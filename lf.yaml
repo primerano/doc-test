@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description:  Lake Formation setup 
+
+Parameters:
+  LakePrefix:
+    Description: prefix used on s3 bucket, glue and lf resources
+    Type: String
+
+Resources:
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Description: Glue Database for Lake Formation
+        Name: !Sub "${LakePrefix}-${AWS::AccountId}-${AWS::Region}"
+        Parameters: { "CreateTableDefaultPermissions": "" }
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      BucketName: !Sub "${LakePrefix}-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AWSGlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties :
+      RoleName: !Sub "${LakePrefix}-LFGlueServiceRole"
+      Description: IAM Role to used by Glue and LF
+      AssumeRolePolicyDocument:
+        Version : 2012-10-17
+        Statement :
+          -
+            Effect : Allow
+            Principal :
+              Service :
+                - glue.amazonaws.com
+                - lakeformation.amazonaws.com
+            Action :
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - !Ref CrawlerPolicy
+
+  CrawlerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Crawler policy to access the source s3 bucket
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - 'lakeformation:GetDataAccess'
+            Resource: '*'
+
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+        Role: !GetAtt AWSGlueServiceRole.Arn
+        Name: !Sub "${LakePrefix}-Glue-Crawler"
+        DatabaseName: !Ref GlueDatabase
+        LakeFormationConfiguration: 
+          UseLakeFormationCredentials: true
+        Targets:
+          S3Targets:
+            - Path: !Ref DataBucket
+
+
+
+  LFRegisterLocationServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${LakePrefix}-LFRegisterLocationServiceRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lakeformation.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+
+  S3DataLakePolicy:
+    DependsOn: 
+      - LFRegisterLocationServiceRole
+      - DataBucket
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: 'S3DataLakePolicy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - lakeformation:RegisterResource
+            Resource:
+              - !GetAtt 'DataBucket.Arn'
+          -
+            Effect: 'Allow'
+            Action:
+              - s3:*
+            Resource:
+              - !Sub "${DataBucket.Arn}/*"
+              - !Sub "${DataBucket.Arn}"
+      Roles:
+        - !Ref LFRegisterLocationServiceRole
+
+  LFDatabasePermission:
+     DependsOn: GlueDatabase
+     Type: AWS::LakeFormation::Permissions
+     Properties:
+       DataLakePrincipal:
+         DataLakePrincipalIdentifier: !GetAtt 'AWSGlueServiceRole.Arn'
+       Permissions:
+         - ALL
+       Resource:
+         DatabaseResource:
+           Name: !Ref GlueDatabase
+
+  LFDataLakeLocation:
+    DependsOn: DataBucket
+    Type: AWS::LakeFormation::Resource
+    Properties:
+      ResourceArn: !GetAtt 'DataBucket.Arn'
+      RoleArn: !GetAtt 'LFRegisterLocationServiceRole.Arn'
+      UseServiceLinkedRole: false
+
+  LFDataLocationPermission:
+    DependsOn: LFDataLakeLocation
+    Type: AWS::LakeFormation::Permissions
+    Properties:
+      DataLakePrincipal:
+        DataLakePrincipalIdentifier: !GetAtt 'AWSGlueServiceRole.Arn'
+      Permissions:
+        - DATA_LOCATION_ACCESS
+      Resource:
+        DataLocationResource:
+          S3Resource: !Sub "${DataBucket.Arn}"
+
+
+Outputs:
+  DataLakeBucket:
+    Description: Data Lake Bucket Name
+    Value: !Ref DataBucket
+  GlueCrawlerName:
+    Description: Glue Crawler Name
+    Value: !Ref GlueCrawler
+  Databasename:
+      Description: Glue Database Name
+      Value: !Ref GlueDatabase
